@@ -19,7 +19,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Nom exact de la voix clonée tel qu'affiché dans Google AI Studio
 CLONED_VOICE_NAME = "Ma Voix"
 
 # ==========================================
@@ -35,7 +34,6 @@ def reinitialiser_session():
 # FONCTIONS AUDIO (CONVERSION WAV OFFICIELLE AI STUDIO)
 # ==========================================
 def parse_audio_mime_type(mime_type: str) -> dict:
-    """Extrait la fréquence d'échantillonnage et la résolution depuis le type MIME."""
     bits_per_sample = 16
     rate = 24000
     parts = mime_type.split(";")
@@ -54,7 +52,6 @@ def parse_audio_mime_type(mime_type: str) -> dict:
     return {"bits_per_sample": bits_per_sample, "rate": rate}
 
 def convert_to_wav(audio_data: bytes, mime_type: str) -> bytes:
-    """Ajoute l'en-tête RIFF/WAV au flux audio brut renvoyé par Gemini TTS."""
     parameters = parse_audio_mime_type(mime_type)
     bits_per_sample = parameters["bits_per_sample"]
     sample_rate = parameters["rate"]
@@ -105,7 +102,6 @@ def extraire_texte_fichier(fichier_telecharge) -> str:
     return ""
 
 def nettoyer_pour_tts(texte: str) -> str:
-    """Supprime les symboles lus à voix haute (*, #, _) et corrige les références chiffrées."""
     if not texte:
         return ""
     texte = re.sub(r'(\d+):(\d+)', r'\1, \2', texte)
@@ -118,15 +114,18 @@ def nettoyer_pour_tts(texte: str) -> str:
     return texte.strip()
 
 # ==========================================
-# MOTEURS IA (ADAPTATION & SYNTHÈSE STREAMING)
+# MOTEURS IA (TEXTE & AUDIO V1ALPHA)
 # ==========================================
-def executer_requete_ia(pool_cles: list, fonction_appel, *args):
+def executer_requete_ia(pool_cles: list, fonction_appel, *args, api_version: str = None):
     if not pool_cles:
         raise ValueError("Aucune clé API valide configurée.")
 
     for idx, cle in enumerate(pool_cles):
         try:
-            client = genai.Client(api_key=cle)
+            if api_version:
+                client = genai.Client(api_key=cle, http_options={"api_version": api_version})
+            else:
+                client = genai.Client(api_key=cle)
             return fonction_appel(client, *args)
         except Exception as e:
             if idx + 1 < len(pool_cles):
@@ -166,7 +165,7 @@ def generer_adaptation_storybrand(client: genai.Client, texte_source: str, model
     return json.loads(reponse.text)
 
 def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_name: str, modele_tts: str) -> bytes:
-    """Génère la piste audio WAV via generate_content_stream avec la syntaxe officielle AI Studio."""
+    """Génère la piste audio WAV via generate_content_stream sur l'endpoint v1alpha."""
     texte_propre = nettoyer_pour_tts(texte)
     
     contents = [
@@ -179,7 +178,7 @@ def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_name: str, mo
     ]
     
     generate_content_config = types.GenerateContentConfig(
-        temperature=0.35,  # Température modérée pour stabiliser le timbre entre les séquences
+        temperature=0.35,
         response_modalities=["audio"],
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
@@ -245,8 +244,23 @@ def main():
         )
         modele_tts = st.text_input("Modèle TTS", value="gemini-3.8-flash-tts")
         voice_name = st.text_input("Nom Voix Clonée (AI Studio)", value=CLONED_VOICE_NAME)
+        api_ver_tts = st.selectbox("Version API TTS", ["v1alpha", "v1beta"], index=0)
 
-        st.info("⚠️ La clé API doit appartenir au même projet AI Studio que 'Ma Voix'.")
+        st.divider()
+        if st.button("🔊 Tester ma voix (5 sec)", use_container_width=True):
+            with st.spinner("Test de la voix clonée..."):
+                try:
+                    test_wav = executer_requete_ia(
+                        pool_cles,
+                        synthetiser_bloc_audio,
+                        "Bonjour, ici Claudio AHN. Bienvenue sur Clarmarque.",
+                        voice_name,
+                        modele_tts,
+                        api_version=api_ver_tts
+                    )
+                    st.audio(test_wav, format="audio/wav")
+                except Exception as e:
+                    st.error(str(e))
 
         if st.button("🔄 Nouvel épisode", use_container_width=True):
             reinitialiser_session()
@@ -322,7 +336,8 @@ def main():
                             synthetiser_bloc_audio,
                             bloc["texte"],
                             voice_name,
-                            modele_tts
+                            modele_tts,
+                            api_version=api_ver_tts
                         )
 
                         nom_fichier = f"{bloc['sequence']}_Claudio.wav"
