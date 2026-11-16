@@ -1,6 +1,8 @@
 import io
 import json
+import mimetypes
 import re
+import struct
 import time
 import zipfile
 import fitz  # PyMuPDF
@@ -17,15 +19,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# ID de ta voix clonée sur Google AI Studio ("Ma Voix")
-CUSTOM_VOICE_ID = "voice_tlmpjv7km4sh"
-
-# Verrouillage prosodique pour éviter toute dérive d'accent ou de débit
-VOICE_STYLE_LOCK = (
-    "Langue : Français. Posture : Architecte de marque pédagogue, posé, chaleureux et assuré. "
-    "Débit régulier d'atelier (135 mots/min), articulation nette, ton naturel et conversationnel. "
-    "Conserve exactement la même hauteur tonale et le même accent sur tout le texte."
-)
+# Nom exact de la voix clonée tel qu'affiché dans Google AI Studio
+CLONED_VOICE_NAME = "Ma Voix"
 
 # ==========================================
 # GESTION DE LA MÉMOIRE (SESSION STATE)
@@ -37,10 +32,61 @@ def reinitialiser_session():
     st.session_state.blocs_script = None
 
 # ==========================================
+# FONCTIONS AUDIO (CONVERSION WAV OFFICIELLE AI STUDIO)
+# ==========================================
+def parse_audio_mime_type(mime_type: str) -> dict:
+    """Extrait la fréquence d'échantillonnage et la résolution depuis le type MIME."""
+    bits_per_sample = 16
+    rate = 24000
+    parts = mime_type.split(";")
+    for param in parts:
+        param = param.strip()
+        if param.lower().startswith("rate="):
+            try:
+                rate = int(param.split("=", 1)[1])
+            except (ValueError, IndexError):
+                pass
+        elif param.startswith("audio/L"):
+            try:
+                bits_per_sample = int(param.split("L", 1)[1])
+            except (ValueError, IndexError):
+                pass
+    return {"bits_per_sample": bits_per_sample, "rate": rate}
+
+def convert_to_wav(audio_data: bytes, mime_type: str) -> bytes:
+    """Ajoute l'en-tête RIFF/WAV au flux audio brut renvoyé par Gemini TTS."""
+    parameters = parse_audio_mime_type(mime_type)
+    bits_per_sample = parameters["bits_per_sample"]
+    sample_rate = parameters["rate"]
+    num_channels = 1
+    data_size = len(audio_data)
+    bytes_per_sample = bits_per_sample // 8
+    block_align = num_channels * bytes_per_sample
+    byte_rate = sample_rate * block_align
+    chunk_size = 36 + data_size
+
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        chunk_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size
+    )
+    return header + audio_data
+
+# ==========================================
 # FONCTIONS UTILITAIRES (CLÉS, EXTRACTION, NETTOYAGE)
 # ==========================================
 def assainir_cle(cle_brute: str) -> str:
-    """Élimine les antislashes Markdown, espaces ou guillemets parasites."""
     return (
         cle_brute.replace(r'\_', '_')
         .replace('\\', '')
@@ -50,7 +96,6 @@ def assainir_cle(cle_brute: str) -> str:
     )
 
 def extraire_texte_fichier(fichier_telecharge) -> str:
-    """Extrait proprement le texte d'un .txt ou .pdf via PyMuPDF."""
     nom = fichier_telecharge.name.lower()
     if nom.endswith(".txt"):
         return fichier_telecharge.read().decode("utf-8", errors="ignore").strip()
@@ -73,10 +118,9 @@ def nettoyer_pour_tts(texte: str) -> str:
     return texte.strip()
 
 # ==========================================
-# MOTEURS IA (CLÉ PAYANTE + FAILOVER DE SECOURS)
+# MOTEURS IA (ADAPTATION & SYNTHÈSE STREAMING)
 # ==========================================
 def executer_requete_ia(pool_cles: list, fonction_appel, *args):
-    """Exécute l'appel API avec la clé principale (payante) et bascule si nécessaire."""
     if not pool_cles:
         raise ValueError("Aucune clé API valide configurée.")
 
@@ -92,7 +136,6 @@ def executer_requete_ia(pool_cles: list, fonction_appel, *args):
                 raise RuntimeError(f"Erreur API : {e}")
 
 def generer_adaptation_storybrand(client: genai.Client, texte_source: str, modele_texte: str) -> list:
-    """Adapte le podcast de référence au positionnement Clarmarque (Claudio AHN uniquement)."""
     system_prompt = """
     Tu es l'architecte éditorial du podcast 'Clarmarque' animé par Claudio AHN.
     Adapte la transcription de référence fournie au marché francophone :
@@ -122,28 +165,56 @@ def generer_adaptation_storybrand(client: genai.Client, texte_source: str, model
     )
     return json.loads(reponse.text)
 
-def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_id: str, seed_val: int, modele_tts: str) -> bytes:
-    """Génère la piste audio WAV avec la voix clonée de Claudio AHN."""
+def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_name: str, modele_tts: str) -> bytes:
+    """Génère la piste audio WAV via generate_content_stream avec la syntaxe officielle AI Studio."""
     texte_propre = nettoyer_pour_tts(texte)
-    prompt_tts = f"[Style: {VOICE_STYLE_LOCK}]\n\n{texte_propre}"
     
-    reponse = client.models.generate_content(
-        model=modele_tts,
-        contents=prompt_tts,
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            seed=int(seed_val),
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice_id
-                    )
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=f"## Transcript:\n{texte_propre}"),
+            ],
+        ),
+    ]
+    
+    generate_content_config = types.GenerateContentConfig(
+        temperature=0.35,  # Température modérée pour stabiliser le timbre entre les séquences
+        response_modalities=["audio"],
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=voice_name
                 )
             )
-        )
+        ),
     )
-    return reponse.candidates[0].content.parts[0].inline_data.data
+
+    audio_data = bytearray()
+    mime_type = "audio/L16;rate=24000"
+
+    for chunk in client.models.generate_content_stream(
+        model=modele_tts,
+        contents=contents,
+        config=generate_content_config,
+    ):
+        if chunk.parts is None:
+            continue
+        if chunk.parts[0].inline_data and chunk.parts[0].inline_data.data:
+            inline_data = chunk.parts[0].inline_data
+            audio_data.extend(inline_data.data)
+            if inline_data.mime_type:
+                mime_type = inline_data.mime_type
+
+    if not audio_data:
+        raise ValueError("Aucun flux audio n'a été retourné par le modèle TTS.")
+
+    file_extension = mimetypes.guess_extension(mime_type)
+    data_buffer = bytes(audio_data)
+    if file_extension is None:
+        data_buffer = convert_to_wav(data_buffer, mime_type)
+
+    return data_buffer
 
 # ==========================================
 # INTERFACE UTILISATEUR STREAMLIT
@@ -153,7 +224,6 @@ def main():
     st.markdown("Production éditoriale & synthèse vocale clonée (**Claudio AHN**) prête pour **Adobe Audition**.")
     st.divider()
 
-    # Chargement de la clé API payante depuis les Secrets Streamlit
     cles_brutes = st.secrets.get("GOOGLE_API_KEYS", None)
     if cles_brutes is None:
         cle_solo = st.secrets.get("GOOGLE_API_KEY", "")
@@ -162,7 +232,6 @@ def main():
         pool_initial = list(cles_brutes)
     pool_cles = [assainir_cle(k) for k in pool_initial if assainir_cle(k)]
 
-    # Barre latérale de configuration
     with st.sidebar:
         st.header("⚙️ Studio & Voix Clonée")
         st.caption(f"💳 **{len(pool_cles)} clé(s) API** active(s).")
@@ -175,10 +244,9 @@ def main():
             ["gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-3.7-flash"]
         )
         modele_tts = st.text_input("Modèle TTS", value="gemini-3.8-flash-tts")
-        voice_id = st.text_input("ID Voix Clonée (Claudio AHN)", value=CUSTOM_VOICE_ID)
-        seed_vocal = st.number_input("Seed vocal (verrouillage timbre)", value=42, step=1)
+        voice_name = st.text_input("Nom Voix Clonée (AI Studio)", value=CLONED_VOICE_NAME)
 
-        st.info("⚠️ Assure-toi que la clé API provient du même projet AI Studio où la voix a été clonée.")
+        st.info("⚠️ La clé API doit appartenir au même projet AI Studio que 'Ma Voix'.")
 
         if st.button("🔄 Nouvel épisode", use_container_width=True):
             reinitialiser_session()
@@ -253,8 +321,7 @@ def main():
                             pool_cles,
                             synthetiser_bloc_audio,
                             bloc["texte"],
-                            voice_id,
-                            seed_vocal,
+                            voice_name,
                             modele_tts
                         )
 
