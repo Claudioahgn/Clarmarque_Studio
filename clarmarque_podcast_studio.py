@@ -11,15 +11,16 @@ from google.genai import types
 import streamlit as st
 
 # ==========================================
-# CONFIGURATION DE LA PAGE & PARAMÈTRES CLARMARQUE
+# CONFIGURATION DE LA PAGE & PARAMÈTRES CLARI'MARQUE
 # ==========================================
 st.set_page_config(
-    page_title="Clarmarque Podcast Studio — Claudio AHN",
+    page_title="CLARI'MARQUE Podcast Studio — Claudio AHN",
     page_icon="🎙️",
     layout="wide"
 )
 
-CLONED_VOICE_NAME = "Ma Voix"
+# Identifiant technique de ta voix clonée sur Google AI Studio
+CLONED_VOICE_ID = "voice_tlmpjv7km4sh"
 
 # ==========================================
 # GESTION DE LA MÉMOIRE (SESSION STATE)
@@ -34,6 +35,7 @@ def reinitialiser_session():
 # FONCTIONS AUDIO (CONVERSION WAV OFFICIELLE AI STUDIO)
 # ==========================================
 def parse_audio_mime_type(mime_type: str) -> dict:
+    """Extrait la fréquence d'échantillonnage et la résolution depuis le type MIME."""
     bits_per_sample = 16
     rate = 24000
     parts = mime_type.split(";")
@@ -52,6 +54,7 @@ def parse_audio_mime_type(mime_type: str) -> dict:
     return {"bits_per_sample": bits_per_sample, "rate": rate}
 
 def convert_to_wav(audio_data: bytes, mime_type: str) -> bytes:
+    """Ajoute l'en-tête RIFF/WAV au flux audio brut renvoyé par Gemini TTS."""
     parameters = parse_audio_mime_type(mime_type)
     bits_per_sample = parameters["bits_per_sample"]
     sample_rate = parameters["rate"]
@@ -102,6 +105,7 @@ def extraire_texte_fichier(fichier_telecharge) -> str:
     return ""
 
 def nettoyer_pour_tts(texte: str) -> str:
+    """Supprime les symboles lus à voix haute (*, #, _) et corrige les références chiffrées."""
     if not texte:
         return ""
     texte = re.sub(r'(\d+):(\d+)', r'\1, \2', texte)
@@ -136,7 +140,7 @@ def executer_requete_ia(pool_cles: list, fonction_appel, *args, api_version: str
 
 def generer_adaptation_storybrand(client: genai.Client, texte_source: str, modele_texte: str) -> list:
     system_prompt = """
-    Tu es l'architecte éditorial du podcast 'Clarmarque' animé par Claudio AHN.
+    Tu es l'architecte éditorial du podcast 'CLARI'MARQUE' animé par Claudio AHN.
     Adapte la transcription de référence fournie au marché francophone :
     - Posture d'artisan-bâtisseur et maître d'œuvre (pragmatisme, bon sens opérationnel, zéro jargon d'agence).
     - Remplace les anecdotes/métaphores américaines par des réalités francophones concrètes.
@@ -146,7 +150,7 @@ def generer_adaptation_storybrand(client: genai.Client, texte_source: str, model
     
     Découpe le monologue en 4 séquences logiques :
     1. "01_Accroche_Ouverture"
-    2. "02_Developpement_Partie_1" (avant la coupure pub du hub clarmarque.com)
+    2. "02_Developpement_Partie_1" (avant la coupure pub du hub CLARI'MARQUE)
     3. "03_Developpement_Partie_2" (après la coupure)
     4. "04_Synthese_Defi_Semaine"
     
@@ -164,7 +168,7 @@ def generer_adaptation_storybrand(client: genai.Client, texte_source: str, model
     )
     return json.loads(reponse.text)
 
-def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_name: str, modele_tts: str) -> bytes:
+def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_id: str, modele_tts: str) -> bytes:
     """Génère la piste audio WAV via generate_content_stream sur l'endpoint v1alpha."""
     texte_propre = nettoyer_pour_tts(texte)
     
@@ -183,7 +187,7 @@ def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_name: str, mo
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                    voice_name=voice_name
+                    voice_name=voice_id
                 )
             )
         ),
@@ -219,7 +223,7 @@ def synthetiser_bloc_audio(client: genai.Client, texte: str, voice_name: str, mo
 # INTERFACE UTILISATEUR STREAMLIT
 # ==========================================
 def main():
-    st.title("🎙️ Clarmarque Podcast Studio")
+    st.title("🎙️ CLARI'MARQUE Podcast Studio")
     st.markdown("Production éditoriale & synthèse vocale clonée (**Claudio AHN**) prête pour **Adobe Audition**.")
     st.divider()
 
@@ -243,7 +247,7 @@ def main():
             ["gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-3.7-flash"]
         )
         modele_tts = st.text_input("Modèle TTS", value="gemini-3.8-flash-tts")
-        voice_name = st.text_input("Nom Voix Clonée (AI Studio)", value=CLONED_VOICE_NAME)
+        voice_id = st.text_input("ID Voix Clonée (AI Studio)", value=CLONED_VOICE_ID)
         api_ver_tts = st.selectbox("Version API TTS", ["v1alpha", "v1beta"], index=0)
 
         st.divider()
@@ -253,8 +257,8 @@ def main():
                     test_wav = executer_requete_ia(
                         pool_cles,
                         synthetiser_bloc_audio,
-                        "Bonjour, ici Claudio AHN. Bienvenue sur Clarmarque.",
-                        voice_name,
+                        "Bonjour, ici Claudio AHN. Bienvenue sur CLARI'MARQUE.",
+                        voice_id,
                         modele_tts,
                         api_version=api_ver_tts
                     )
@@ -282,7 +286,7 @@ def main():
 
     if texte_reference:
         st.success(f"✅ Source chargée ({len(texte_reference)} caractères).")
-        if st.button("✨ Générer le script Clarmarque", type="primary"):
+        if st.button("✨ Générer le script CLARI'MARQUE", type="primary"):
             with st.spinner("Rédaction et adaptation StoryBrand en cours..."):
                 try:
                     blocs = executer_requete_ia(pool_cles, generer_adaptation_storybrand, texte_reference, modele_texte)
@@ -314,7 +318,7 @@ def main():
         st.download_button(
             label="📄 Télécharger le script validé (.txt)",
             data=script_complet_txt,
-            file_name="Script_Clarmarque_Valide.txt",
+            file_name="Script_CLARI_MARQUE_Valide.txt",
             mime="text/plain"
         )
 
@@ -335,7 +339,7 @@ def main():
                             pool_cles,
                             synthetiser_bloc_audio,
                             bloc["texte"],
-                            voice_name,
+                            voice_id,
                             modele_tts,
                             api_version=api_ver_tts
                         )
@@ -350,7 +354,7 @@ def main():
                 st.download_button(
                     label="📥 Télécharger le pack audio (.ZIP)",
                     data=zip_buffer.getvalue(),
-                    file_name="Clarmarque_Pistes_Claudio.zip",
+                    file_name="CLARI_MARQUE_Pistes_Claudio.zip",
                     mime="application/zip",
                     type="primary"
                 )
